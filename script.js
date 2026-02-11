@@ -47,6 +47,13 @@ let hunterInterval = 5 * 60 * 1000;
 let runnerInterval = 5 * 60 * 1000;
 let freezeUntil = null;
 let realtimeUntil = null;
+let realtimeLoop = null;
+
+function initUpdateState() {
+  if (!localStorage.getItem("lastUpdateAt")) {
+    localStorage.setItem("lastUpdateAt", 0);
+  }
+}
 
 /*************************
  * UI
@@ -116,16 +123,18 @@ if (playerRole === "admin") {
 /*************************
  * 更新状態初期化
  *************************/
-function initUpdateState() {
-  if (!localStorage.getItem("updateToken")) {
-    localStorage.setItem("updateToken", "true");
-  }
-}
+
 
 /*************************
  * ゲーム開始
  *************************/
 function startGame() {
+  setDoc(doc(db, "players", playerId), {
+  name: playerName,
+  role: playerRole,
+  createdAt: serverTimestamp()
+}, { merge: true });
+
   if (gameStarted) return;
   gameStarted = true;
 if (playerRole === "admin") {
@@ -209,11 +218,31 @@ const popupContent = () => {
         markers[id].setIcon(icon);
       } else {
         markers[id] = L.marker(pos, { icon })
-          .addTo(map)
-          .bindPopup("")
-          .on("click", function () {
-            this.setPopupContent(popupContent());
-          });
+  .addTo(map)
+  .bindPopup("")
+  .on("popupopen", function () {
+
+    const marker = this;
+
+    // 最初に表示
+    marker.setPopupContent(popupContent());
+
+    // 1秒ごとに更新
+    marker._popupInterval = setInterval(() => {
+      marker.setPopupContent(popupContent());
+    }, 1000);
+
+  })
+  .on("popupclose", function () {
+
+    // 閉じたら停止
+    if (this._popupInterval) {
+      clearInterval(this._popupInterval);
+      this._popupInterval = null;
+    }
+
+  });
+
       }
     });
 
@@ -298,8 +327,7 @@ async function applyUpdate(lat, lng) {
     updatedAt: serverTimestamp()
   });
 
-  localStorage.setItem("lastUpdateAt", Date.now());
-  localStorage.setItem("updateToken", "false");
+  localStorage.setItem("lastUpdateAt", Date.now())
 
   document.getElementById("updateStatus").innerText =
   "この時間内ですでに位置更新しました";
@@ -327,20 +355,38 @@ if (freezeUntil && freezeUntil > now) {
 
 // リアルタイム中
 if (realtimeUntil && realtimeUntil > now) {
+
   const diff = realtimeUntil - now;
   const min = Math.floor(diff / 60000);
   const sec = Math.floor((diff % 60000) / 1000);
 
   statusBox.innerText = `⚡ リアルタイム更新中 残り ${min}分${sec}秒`;
+
+  // 🔥 リアルタイム更新ループ開始
+  if (!realtimeLoop) {
+    realtimeLoop = setInterval(() => {
+      updateByGPS();
+    }, 5000); // 5秒ごと更新（調整可能）
+  }
+
 } else {
+
   statusBox.innerText = "";
+
+  // 🔥 リアルタイム終了時に停止
+  if (realtimeLoop) {
+    clearInterval(realtimeLoop);
+    realtimeLoop = null;
+    localStorage.setItem("lastUpdateAt", Date.now());
+  }
 }
+
 
     const last = Number(localStorage.getItem("lastUpdateAt"));
     const timerEl = document.getElementById("timer");
     const statusEl = document.getElementById("updateStatus");
 
-    if (!last) {
+    if (!last || last === 0) {
 
   if (allowManual) {
     timerEl.innerText = "地下モードで更新してください";
@@ -356,21 +402,18 @@ if (realtimeUntil && realtimeUntil > now) {
     const next = last + getCurrentInterval();
     const diff = next - Date.now();
 
-    if (diff <= 0) {
-
-  localStorage.setItem("updateToken", "true");
-
-  if (allowManual) {
-    timerEl.innerText = "地下モードで更新してください";
-    statusEl.innerText = "GPSが使えません";
-  } else {
-    timerEl.innerText = "更新できます";
-    statusEl.innerText = "この5分間ではまだ更新していません";
-    updateByGPS();
+   if (diff <= 0) {
+if (realtimeUntil && realtimeUntil > now) return;
+  if (!allowManual) {
+    updateByGPS(); // 🔥 自動更新
   }
+
+  timerEl.innerText = "更新中...";
+  statusEl.innerText = "";
 
   return;
 }
+
 
     const remaining = Math.floor(diff / 1000);
     const min = Math.floor(remaining / 60);
@@ -549,13 +592,17 @@ function getIconByRole(role) {
 function canUpdateNow() {
   const now = Date.now();
 
-  // 更新停止中は強制的に更新不可
+  // 更新停止中
   if (freezeUntil && freezeUntil > now) {
     return false;
   }
 
-  return localStorage.getItem("updateToken") === "true";
+  const last = Number(localStorage.getItem("lastUpdateAt"));
+  if (!last) return true;
+
+  return now >= last + getCurrentInterval();
 }
+
 
 function getCurrentInterval() {
   const now = Date.now();
